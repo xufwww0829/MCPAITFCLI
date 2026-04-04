@@ -107,12 +107,12 @@ class Reflector:
 注意：只输出 JSON，不要输出其他内容。"""
 
     WEIGHTS = {
-        "accuracy": 0.25,
+        "accuracy": 0.30,
         "structure_logic": 0.20,
         "citation_content": 0.10,
         "language": 0.10,
         "word_count": 0.15,
-        "format": 0.10,
+        "format": 0.15,
     }
 
     def __init__(

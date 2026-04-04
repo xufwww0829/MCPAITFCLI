@@ -3,7 +3,6 @@
 使用 click + rich 实现美观的命令行交互体验。
 """
 
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -156,20 +155,25 @@ def save_paper(paper: str, topic: str, output_dir: Optional[Path] = None) -> Pat
 
 @click.group(invoke_without_command=True)
 @click.option("--version", "-v", is_flag=True, help="显示版本信息")
+@click.option("--interactive", "-i", is_flag=True, help="进入交互模式")
 @click.pass_context
-def main(ctx: click.Context, version: bool):
+def main(ctx: click.Context, version: bool, interactive: bool):
     """✦ MCP Paper Agent - 反思智能体论文生成系统 ✦
 
     基于迭代优化的学术论文自动生成工具，采用星座主题界面。
+
+    直接运行 'mcp-paper' 进入交互模式，或使用子命令：
+      mcp-paper generate "主题"    快速生成论文
+      mcp-paper config             查看配置
+      mcp-paper cache --all        清空缓存
     """
     if version:
         console.print(f"[star]★[/star] mcp-paper-agent version {__version__}")
         return
 
     if ctx.invoked_subcommand is None:
-        print_banner()
-        console.print("[info]使用 'mcp-paper generate <主题>' 开始生成论文[/info]")
-        console.print("[dim]使用 'mcp-paper --help' 查看所有命令[/dim]")
+        from mcp_paper_agent.cli.shell import run_interactive
+        run_interactive()
 
 
 @main.command()
@@ -230,28 +234,14 @@ def generate(
     ) as progress:
         task = progress.add_task("[accent]正在生成论文...[/accent]", total=100)
 
-        stages = [
-            ("[agent.retriever]检索资料中...[/agent.retriever]", 10),
-            ("[agent.generator]生成初稿中...[/agent.generator]", 30),
-        ]
-
-        for i in range(max_iter):
-            stages.append(
-                (f"[agent.reflector]第 {i+1} 轮评估...[/agent.reflector]", 30 + i * 20 + 10)
+        def update_progress(stage: str, step: int, total: int):
+            progress.update(
+                task,
+                description=f"[accent]{stage}[/accent]",
+                completed=int(step / total * 100),
             )
-            if i < max_iter - 1:
-                stages.append(
-                    (f"[agent.revisor]第 {i+1} 轮修订...[/agent.revisor]", 30 + i * 20 + 20)
-                )
 
-        current = 0
-        for desc, target_val in stages:
-            progress.update(task, description=desc)
-            while current < target_val:
-                time.sleep(0.05)
-                current += 1
-                progress.update(task, completed=current)
-
+        orchestrator.progress_callback = update_progress
         result = orchestrator.generate(topic, use_cache=not no_cache)
         progress.update(task, completed=100)
 
@@ -284,7 +274,7 @@ def config():
     env_vars = [
         ("OPENROUTER_API_KEY", "***" if settings.openrouter.api_key else "未设置"),
         ("OPENROUTER_MODEL", settings.openrouter.model),
-        ("TAVILY_API_KEY", "***" if settings.tavily.api_key else "未设置"),
+        ("OPENROUTER_SEARCH_MODEL", settings.openrouter.search_model),
         ("TARGET_WORD_COUNT", str(settings.paper.target_word_count)),
         ("MAX_ITERATIONS", str(settings.paper.max_iterations)),
     ]
@@ -307,6 +297,13 @@ def cache(clear_all: bool):
         console.print("[success]✓ 所有缓存已清空[/success]")
     else:
         console.print("[info]使用 --all 参数清空所有缓存[/info]")
+
+
+@main.command()
+def interactive():
+    """✦ 进入交互模式"""
+    from mcp_paper_agent.cli.shell import run_interactive
+    run_interactive()
 
 
 if __name__ == "__main__":

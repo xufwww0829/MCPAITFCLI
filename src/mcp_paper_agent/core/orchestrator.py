@@ -7,7 +7,7 @@
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from diskcache import Cache
 
@@ -19,6 +19,8 @@ from mcp_paper_agent.config import settings
 from mcp_paper_agent.logger import get_logger
 
 logger = get_logger()
+
+ProgressCallback = Callable[[str, int, int], None]
 
 
 @dataclass
@@ -70,6 +72,7 @@ class Orchestrator:
         min_quality_score: Optional[float] = None,
         target_word_count: Optional[int] = None,
         word_count_tolerance: Optional[int] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ):
         """初始化协调器
 
@@ -79,11 +82,13 @@ class Orchestrator:
             min_quality_score: 最低质量分数阈值
             target_word_count: 目标字数
             word_count_tolerance: 字数允许偏差
+            progress_callback: 进度回调函数 (stage_name, current_step, total_steps)
         """
         self.max_iterations = max_iterations or settings.paper.max_iterations
         self.min_quality_score = min_quality_score or settings.paper.min_quality_score
         self.target_word_count = target_word_count or settings.paper.target_word_count
         self.word_count_tolerance = word_count_tolerance or settings.paper.word_count_tolerance
+        self.progress_callback = progress_callback
 
         self.retriever = Retriever()
         self.generator = Generator()
@@ -93,6 +98,11 @@ class Orchestrator:
         self.cache_dir = cache_dir or settings.cache.cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache = Cache(str(self.cache_dir / "paper_cache"))
+
+    def _report_progress(self, stage: str, step: int, total: int):
+        """报告进度"""
+        if self.progress_callback:
+            self.progress_callback(stage, step, total)
 
     def _get_paper_cache_key(self, topic: str, model: str) -> str:
         """生成论文缓存键"""
@@ -194,14 +204,21 @@ class Orchestrator:
                 from_cache=True,
             )
 
+        total_steps = 2 + self.max_iterations * 2
+        current_step = 0
+
         logger.info(f"开始生成论文: {topic}")
         iteration_history: List[IterationRecord] = []
 
+        current_step += 1
+        self._report_progress("检索资料中...", current_step, total_steps)
         logger.agent("Orchestrator", "执行检索...")
         retrieval_output: RetrievalOutput = self.retriever.search(topic)
         context = retrieval_output.context
         citations = retrieval_output.citations
 
+        current_step += 1
+        self._report_progress("生成初稿中...", current_step, total_steps)
         logger.agent("Orchestrator", "生成初稿...")
         gen_output: GeneratorOutput = self.generator.generate(
             topic=topic,
@@ -212,6 +229,8 @@ class Orchestrator:
         current_paper = gen_output.paper
 
         for iteration in range(1, self.max_iterations + 1):
+            current_step += 1
+            self._report_progress(f"第 {iteration} 轮评估...", current_step, total_steps)
             current_paper, report = self._run_single_iteration(
                 paper=current_paper,
                 context=context,
@@ -240,6 +259,9 @@ class Orchestrator:
             should_stop, _ = self._check_termination(report, iteration)
             if should_stop:
                 break
+
+            current_step += 1
+            self._report_progress(f"第 {iteration} 轮修订...", current_step, total_steps)
 
         final_report = self.reflector.assess(
             paper=current_paper,

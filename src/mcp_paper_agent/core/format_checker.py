@@ -111,11 +111,12 @@ class FormatChecker:
         Returns:
             (分数, 问题列表)
         """
-        ref_section = re.search(r'(?<=参考文献\s*\n)(.*?)(?=\n\n|\Z)', self.paper, re.DOTALL)
-        if not ref_section:
+        ref_match = re.search(r'参考文献\s*\n(.*)$', self.paper, re.DOTALL)
+        if not ref_match:
             return 0, ["找不到参考文献列表"]
+        ref_section = ref_match.group(1)
 
-        lines = ref_section.group(0).split('\n')
+        lines = ref_section.split('\n')
         expected_count = len(citations)
         actual_count = len([l for l in lines if re.match(r'^\[\d+\]', l.strip())])
         if actual_count != expected_count:

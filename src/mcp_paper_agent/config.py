@@ -27,7 +27,7 @@ class OpenRouterConfig(BaseSettings):
         description="使用的模型名称",
     )
     search_model: str = Field(
-        default="perplexity/llama-3.1-sonar-small-128k-online",
+        default="perplexity/sonar",
         description="搜索用的联网模型名称",
     )
     temperature: float = Field(default=0.7, description="生成温度")
