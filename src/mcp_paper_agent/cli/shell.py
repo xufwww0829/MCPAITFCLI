@@ -1,4 +1,4 @@
-"""交互式 Shell 模块 - 提供类似 opencode 的交互体验"""
+"""交互式 Shell 模块 """
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -11,6 +11,7 @@ from rich.table import Table
 from rich.text import Text
 from rich.layout import Layout
 from rich.live import Live
+from rich.box import ROUNDED, DOUBLE, HEAVY
 
 from mcp_paper_agent.cli.styles import CONSTELLATION_THEME
 from mcp_paper_agent.config import settings
@@ -56,22 +57,37 @@ class InteractiveShell:
     - 直接输入主题生成论文
     """
 
-    WELCOME_BANNER = """
-[primary]╔════════════════════════════════════════════════════════════════╗
-║  ✦  ✧  ★  ☆  ✴  ✵  ❋  ❊  ✦  ✧  ★  ☆  ✴  ✵  ❋  ❊  ✦  ✧  ║
-║                                                              ║
-║    ██████╗ ██████╗  ██████╗ ██████╗  ██████╗ ███╗   ██╗     ║
-║   ██╔════╝██╔══██╗██╔═══██╗██╔══██╗██╔═══██╗████╗  ██║     ║
-║   ██║     ██████╔╝██║   ██║██║  ██║██║   ██║██╔██╗ ██║     ║
-║   ██║     ██╔══██╗██║   ██║██║  ██║██║   ██║██║╚██╗██║     ║
-║   ╚██████╗██║  ██║╚██████╔╝██████╔╝╚██████╔╝██║ ╚████║     ║
-║    ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝     ║
-║                                                              ║
-║           ✦ Paper Agent - 反思智能体论文生成系统 ✦            ║
-║                                                              ║
-║  ✦  ✧  ★  ☆  ✴  ✵  ❋  ❊  ✦  ✧  ★  ☆  ✴  ✵  ❋  ❊  ✦  ✧  ║
-╚══════════════════════════════════════════════════════════════╝[/primary]
-"""
+    def _create_welcome_banner(self) -> Panel:
+        """创建优化的星座主题欢迎横幅"""
+        banner_content = Text()
+        banner_content.append("* * * * * * * * * * * * * * * * * * *\n", style="constellation")
+        banner_content.append("\n")
+
+        banner_content.append("    ██████╗ ██████╗  ██████╗ ██████╗  ██████╗ ███╗   ██╗\n", style="primary")
+        banner_content.append("   ██╔════╝██╔══██╗██╔═══██╗██╔══██╗██╔═══██╗████╗  ██║\n", style="primary")
+        banner_content.append("   ██║     ██████╔╝██║   ██║██║  ██║██║   ██║██╔██╗ ██║\n", style="primary")
+        banner_content.append("   ██║     ██╔══██╗██║   ██║██║  ██║██║   ██║██║╚██╗██║\n", style="primary")
+        banner_content.append("   ╚██████╗██║  ██║╚██████╔╝██████╔╝╚██████╔╝██║ ╚████║\n", style="primary")
+        banner_content.append("    ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝\n", style="primary")
+        banner_content.append("\n")
+        banner_content.append("           * Paper Agent - 反思智能体论文生成系统 *           \n", style="title")
+        banner_content.append("\n")
+        banner_content.append("* * * * * * * * * * * * * * * * * * *\n", style="constellation")
+
+        panel = Panel(
+            banner_content,
+            box=HEAVY,
+            border_style="primary",
+            padding=(1, 2),
+        )
+        return panel
+
+    def _show_welcome(self) -> None:
+        """显示欢迎界面"""
+        console.print(self._create_welcome_banner())
+        console.print()
+
+    WELCOME_BANNER = ""
 
     def __init__(self):
         self.state = ShellState(
@@ -272,21 +288,31 @@ class InteractiveShell:
         console.print("\n[primary]✦ 感谢使用 Paper Agent，再见！✦[/primary]")
 
     def _show_prompt_header(self) -> None:
-        """显示提示符头部"""
-        mode_icon = "🔄" if self.state.mode == Mode.REFLECT else "⚡"
+        """显示优化的提示符头部"""
+        mode_icon = "*" if self.state.mode == Mode.REFLECT else "!"
         mode_str = "反思" if self.state.mode == Mode.REFLECT else "直接"
-        cache_icon = "📦" if self.state.use_cache else "🚫"
+        mode_style = "agent.reflector" if self.state.mode == Mode.REFLECT else "meteor"
+        cache_icon = "[ON]" if self.state.use_cache else "[OFF]"
+        cache_status = "开启" if self.state.use_cache else "关闭"
 
-        header = Text()
-        header.append("┌─ ", style="dim")
-        header.append(f"{mode_icon} {mode_str}模式", style="accent")
-        header.append(" │ ", style="dim")
-        header.append(f"📝 {self.state.target_words}字", style="secondary")
-        header.append(" │ ", style="dim")
-        header.append(f"🔄 {self.state.max_iterations}轮", style="secondary")
-        header.append(" │ ", style="dim")
-        header.append(f"{cache_icon} 缓存", style="secondary")
-        header.append("\n└─▶ ", style="dim")
+        header = Panel(
+            Text.assemble(
+                (f"{mode_icon} ", mode_style),
+                (f"{mode_str}模式", "accent"),
+                ("  |  ", "dim"),
+                ("[DOC] ", "secondary"),
+                (f"{self.state.target_words}字", "accent"),
+                ("  |  ", "secondary"),
+                ("[#] ", "secondary"),
+                (f"{self.state.max_iterations}轮", "iteration"),
+                ("  |  ", "dim"),
+                (f"{cache_icon} ", "secondary"),
+                (f"{cache_status}", "success" if self.state.use_cache else "error"),
+            ),
+            box=ROUNDED,
+            border_style="constellation",
+            padding=(0, 1),
+        )
 
         console.print()
         console.print(header)
@@ -378,7 +404,7 @@ class InteractiveShell:
 
     def run(self) -> None:
         """运行交互式 Shell"""
-        console.print(self.WELCOME_BANNER)
+        self._show_welcome()
         console.print("[dim]输入 /help 查看可用命令，直接输入主题开始生成论文[/dim]")
         self._show_prompt_header()
 
