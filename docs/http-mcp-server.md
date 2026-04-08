@@ -16,19 +16,37 @@ pip install -e .
 
 ## 2. 启动 HTTP MCP 搜索服务
 
-默认启动在 `127.0.0.1:8000`：
+默认会优先读取 `.env` 里的 `MCP_HTTP_HOST`、`MCP_HTTP_PORT` 和 `TAVILY_API_KEY`；如果没有，再回退到 `127.0.0.1:8000`。
+
+最简单的长期配置方式是在项目根目录 `.env` 里写：
+
+```env
+TAVILY_API_KEY=你的密钥
+MCP_HTTP_HOST=127.0.0.1
+MCP_HTTP_PORT=8000
+```
+
+然后直接启动：
 
 ```bash
 mcp-paper-mcp-http --host 127.0.0.1 --port 8000
 ```
 
-如果你有 Tavily Key，推荐一起传入，这样搜索质量会更稳定：
+如果你想显式指定 `.env` 文件，也可以：
+
+```bash
+mcp-paper-mcp-http --env-file .env
+```
+
+如果你临时覆盖 Tavily Key，仍然可以直接传参，这样搜索质量会更稳定：
 
 ```bash
 mcp-paper-mcp-http --host 127.0.0.1 --port 8000 --tavily-api-key YOUR_KEY
 ```
 
 未提供 Tavily Key 时，服务会自动回退到 DuckDuckGo 页面搜索。
+
+`fetch_url` 在抓取某些站点正文时可能会遇到目标网站的 `403 Forbidden`。这是目标网站的反爬/访问策略，不是主程序崩溃。现在服务会在这类情况下自动回退到搜索摘要，不再把整次 MCP 调用直接打成 500 重试。
 
 ## 3. 验证服务是否启动成功
 

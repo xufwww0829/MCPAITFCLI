@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 from openai import OpenAI
 
 from mcp_paper_agent.config import settings
+from mcp_paper_agent.core.citation_checker import CitationChecker
+from mcp_paper_agent.core.evidence import EvidenceExtractor
 from mcp_paper_agent.core.format_checker import FormatChecker
 from mcp_paper_agent.logger import get_logger
 
@@ -114,6 +116,7 @@ class Reflector:
         "word_count": 0.15,
         "format": 0.15,
     }
+    MAX_SUGGESTED_SEARCH_QUERIES = 2
 
     def __init__(
         self,
@@ -139,6 +142,7 @@ class Reflector:
             api_key=self.api_key,
             base_url=self.base_url,
         )
+        self.evidence_extractor = EvidenceExtractor()
 
     def _count_words(self, text: str) -> int:
         """计算中文字数"""
@@ -226,6 +230,14 @@ class Reflector:
         logger.agent("Reflector", "正在进行格式审查...")
         format_checker = FormatChecker(paper)
         format_result = format_checker.full_check(citations)
+        citation_claims = self.evidence_extractor.extract(
+            [
+                type("EvidenceSource", (), {"title": citation, "url": citation.split()[-1], "content": context})()
+                for citation in citations
+                if citation
+            ]
+        )
+        citation_check = CitationChecker(citation_claims).check(paper)
 
         logger.agent("Reflector", "正在进行内容评估...")
         user_prompt = f"""【论文主题】{settings.paper.target_word_count}字论文
@@ -239,6 +251,10 @@ class Reflector:
 
 【自动格式检查发现的问题】（仅供参考，你不需要再评估格式）
 {chr(10).join(format_result.issues) if format_result.issues else '无格式问题'}
+
+【自动引用一致性检查】
+引用一致性得分: {citation_check.score}/10
+{chr(10).join(f"- {issue.message} | 句子: {issue.sentence}" for issue in citation_check.issues[:8]) if citation_check.issues else '无明显引用错配'}
 
 请评估论文质量并输出 JSON 格式的评估报告。"""
 
@@ -258,6 +274,10 @@ class Reflector:
         scores = parsed.get("scores", {})
         scores["format"] = format_result.format_score
         scores["word_count"] = self._calculate_word_count_score(word_count, target)
+        scores["citation_content"] = min(
+            scores.get("citation_content", 5.0),
+            citation_check.score,
+        )
 
         overall_score = sum(
             scores.get(key, 0) * weight
@@ -273,6 +293,15 @@ class Reflector:
             )
             for issue in parsed.get("content_issues", [])
         ]
+        content_issues.extend(
+            ContentIssue(
+                type=issue.issue_type,
+                location="引用一致性检查",
+                text_snippet=issue.sentence,
+                suggestion=issue.message,
+            )
+            for issue in citation_check.issues[:8]
+        )
 
         should_continue = overall_score < settings.paper.min_quality_score
 
@@ -285,7 +314,7 @@ class Reflector:
             content_issues=content_issues,
             should_continue=should_continue,
             supplementary_search_needed=parsed.get("supplementary_search_needed", False),
-            suggested_search_queries=parsed.get("suggested_search_queries", []),
+            suggested_search_queries=parsed.get("suggested_search_queries", [])[: self.MAX_SUGGESTED_SEARCH_QUERIES],
         )
 
         logger.success(f"评估完成，综合分数: {report.overall_score}")

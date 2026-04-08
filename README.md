@@ -15,9 +15,11 @@
 
 ## ✨ 功能特性
 
-- 🔍 **智能检索** - 使用 Perplexity 联网模型进行学术资料搜索
+- 🔍 **MCP 优先检索** - 支持通过 HTTP/stdio MCP 服务联网搜索，并在失败时回退到 OpenRouter
+- 📄 **正文抓取** - 对高价值来源自动抓取正文，增强引用与内容对齐
 - ✍️ **自动生成** - 基于 LLM 自动生成结构化学术论文
 - 🔄 **迭代优化** - 通过反思-修订循环持续提升论文质量
+- 🧪 **引用校验** - 自动检查引用编号、来源覆盖和正文支持关系
 - 📋 **格式审查** - 自动检查 Markdown 格式和论文结构规范
 - 💾 **智能缓存** - 缓存搜索结果，避免重复请求
 - 🎮 **交互模式** - 类似 opencode 的交互式命令行界面
@@ -47,35 +49,142 @@ pip install mcp-paper-agent
 
 ## ⚙️ 配置
 
-### 1. 获取 API Key
+### 推荐配置方式
 
-| 服务 | 用途 | 获取地址 |
-|------|------|----------|
-| OpenRouter | LLM 生成 + 联网搜索 | [openrouter.ai](https://openrouter.ai/keys) |
+项目支持两种搜索路径：
 
-### 2. 设置环境变量
+1. `MCP` 搜索
+2. `OpenRouter` 联网搜索
 
-**Windows (PowerShell):**
-```powershell
-[Environment]::SetEnvironmentVariable("OPENROUTER_API_KEY", "your-api-key-here", "User")
-```
+推荐长期使用 `HTTP MCP`，因为：
 
-**macOS / Linux:**
+- 配置更清晰
+- 服务可单独部署
+- 日志和问题排查更容易
+- 可以复用搜索、正文抓取、来源过滤等工具
+
+### 1. 获取 API Key / 服务
+
+| 服务 | 用途 | 是否必需 | 获取地址 |
+|------|------|----------|----------|
+| OpenRouter | 论文生成、MCP 失败时兜底 | 是 | [openrouter.ai](https://openrouter.ai/keys) |
+| Tavily | HTTP MCP 搜索后端 | 推荐 | [tavily.com](https://www.tavily.com/) |
+
+### 2. 使用 `.env` 配置
+
+推荐直接复制示例文件：
+
 ```bash
-echo 'export OPENROUTER_API_KEY="your-api-key-here"' >> ~/.bashrc
-source ~/.bashrc
+cp .env.example .env
 ```
 
-### 3. 可选配置项
+最常用的一套 `HTTP MCP` 配置如下：
+
+```env
+# OpenRouter
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_MODEL=openai/gpt-4o-mini
+OPENROUTER_SEARCH_MODEL=perplexity/sonar
+
+# HTTP MCP 服务
+TAVILY_API_KEY=your_tavily_api_key_here
+MCP_HTTP_HOST=127.0.0.1
+MCP_HTTP_PORT=8000
+
+# 主程序搜索配置
+SEARCH_PROVIDER=mcp
+MCP_TRANSPORT=http
+MCP_SERVER_URL=http://127.0.0.1:8000
+MCP_SEARCH_TOOL=web_search
+MCP_FETCH_TOOL=fetch_url
+MCP_TIMEOUT=30
+```
+
+如果你暂时不想启用 MCP，也可以直接改成：
+
+```env
+SEARCH_PROVIDER=openrouter
+```
+
+### 3. 关键配置项
 
 | 环境变量 | 默认值 | 说明 |
 |----------|--------|------|
 | `OPENROUTER_API_KEY` | - | OpenRouter API 密钥（必需） |
 | `OPENROUTER_MODEL` | `openai/gpt-4o-mini` | 生成模型 |
 | `OPENROUTER_SEARCH_MODEL` | `perplexity/sonar` | 搜索模型 |
+| `SEARCH_PROVIDER` | `mcp` | 搜索提供商，推荐 `mcp` |
+| `MCP_TRANSPORT` | `http`/`stdio` | MCP 连接方式 |
+| `MCP_SERVER_URL` | `http://127.0.0.1:8000` | HTTP MCP 服务地址 |
+| `MCP_SEARCH_TOOL` | `web_search` | MCP 搜索工具名 |
+| `MCP_FETCH_TOOL` | `fetch_url` | MCP 正文抓取工具名 |
+| `TAVILY_API_KEY` | - | HTTP MCP 搜索后端密钥 |
 | `TARGET_WORD_COUNT` | `1900` | 目标字数 |
 | `MAX_ITERATIONS` | `3` | 最大迭代次数 |
 | `MIN_QUALITY_SCORE` | `8.0` | 质量阈值 |
+| `SEARCH_MAX_RESULTS` | `10` | 主检索每次结果数 |
+| `SEARCH_SUPPLEMENTARY_MAX_QUERIES` | `1` | 每轮补充搜索最多查询数 |
+| `SEARCH_SUPPLEMENTARY_MAX_TOTAL_ROUNDS` | `2` | 全文最多补充搜索轮数 |
+| `SEARCH_SUPPLEMENTARY_MAX_RESULTS` | `4` | 补充搜索结果数 |
+
+### 4. 快速模式
+
+如果你更在意速度，而不是最强覆盖，可以在 `.env` 里改成：
+
+```env
+SEARCH_MAX_RESULTS=6
+SEARCH_SUPPLEMENTARY_MAX_QUERIES=1
+SEARCH_SUPPLEMENTARY_MAX_TOTAL_ROUNDS=1
+SEARCH_SUPPLEMENTARY_MAX_RESULTS=3
+MAX_ITERATIONS=1
+TARGET_WORD_COUNT=1600
+WORD_COUNT_TOLERANCE=300
+MIN_QUALITY_SCORE=7.0
+```
+
+这通常能把一次生成时间明显压缩下来。
+
+---
+
+## 🌐 HTTP MCP 部署
+
+### 1. 启动服务
+
+如果 `.env` 已经配置好 `TAVILY_API_KEY`、`MCP_HTTP_HOST`、`MCP_HTTP_PORT`，直接启动：
+
+```bash
+uv run mcp-paper-mcp-http
+```
+
+也可以显式指定环境文件：
+
+```bash
+uv run mcp-paper-mcp-http --env-file .env
+```
+
+### 2. 健康检查
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+返回：
+
+```json
+{"status":"ok"}
+```
+
+### 3. 当前 MCP 工具
+
+内置 HTTP MCP 服务当前提供：
+
+1. `web_search`
+2. `fetch_url`
+
+其中 `fetch_url` 会自动跳过部分高拦截站点，并在抓取失败时回退为摘要，不会直接导致整次论文生成失败。
+
+更详细的部署说明见 [docs/http-mcp-server.md](./docs/http-mcp-server.md)。
 
 ---
 
@@ -143,19 +252,25 @@ mcp-paper
 
 ```bash
 # 基本用法
-mcp-paper generate "人工智能在医疗领域的应用"
+uv run mcp-paper generate "人工智能在医疗领域的应用"
 
 # 指定参数
-mcp-paper generate "量子计算的发展前景" -w 2000 -i 5
+uv run mcp-paper generate "量子计算的发展前景" -w 2000 -i 5
 
 # 禁用缓存
-mcp-paper generate "区块链技术" --no-cache
+uv run mcp-paper generate "区块链技术" --no-cache
 
 # 详细输出
-mcp-paper generate "深度学习" -v
+uv run mcp-paper generate "深度学习" -v
 
 # 显示预览
-mcp-paper generate "自然语言处理" -p
+uv run mcp-paper generate "自然语言处理" -p
+
+# 指定别的环境文件
+uv run mcp-paper --env-file .env generate "人工智能"
+
+# 显式指定搜索提供商
+uv run mcp-paper generate "人工智能" --search-provider mcp
 ```
 
 #### 命令行参数
@@ -165,6 +280,8 @@ mcp-paper generate "自然语言处理" -p
 | `--output` | `-o` | `./papers/` | 输出目录 |
 | `--max-iter` | `-i` | `3` | 最大迭代次数 |
 | `--words` | `-w` | `1900` | 目标字数 |
+| `--search-provider` | | 配置值 | 指定 `mcp` 或 `openrouter` |
+| `--env-file` | | `.env` | 指定配置文件 |
 | `--no-cache` | | | 禁用缓存 |
 | `--preview` | `-p` | | 显示论文预览 |
 | `--verbose` | `-v` | | 详细输出 |
@@ -198,11 +315,15 @@ src/mcp_paper_agent/
 │   └── revisor.py       # 修订智能体 - 针对性修改
 ├── core/                # 核心模块
 │   ├── orchestrator.py  # 协调器 - 流程控制
-│   └── format_checker.py # 格式审查 - Markdown 规范检查
+│   ├── format_checker.py # 格式审查 - Markdown 规范检查
+│   ├── evidence.py      # 证据抽取与来源覆盖
+│   └── citation_checker.py # 引用一致性检查
 ├── cli/                 # 命令行界面
 │   ├── main.py          # CLI 入口
 │   ├── shell.py         # 交互式 Shell
 │   └── styles.py        # 星座主题样式
+├── mcp/                 # MCP 客户端与工具封装
+├── mcp_server/          # 内置 HTTP MCP 搜索服务
 ├── config.py            # 配置管理
 └── logger.py            # 日志系统
 ```
@@ -286,6 +407,51 @@ papers/
 
 ---
 
+## ⏱️ 性能建议
+
+如果你发现一次生成耗时很长，通常是这几种原因：
+
+1. `MAX_ITERATIONS` 太高，导致多轮反思修订。
+2. 补充搜索过多，尤其是 `Reflector` 连续触发补搜。
+3. `fetch_url` 在多个 PDF 或慢站点上等待超时。
+4. 目标主题过宽，比如直接生成“人工智能”这类大综述。
+
+建议优先这样调：
+
+```env
+MAX_ITERATIONS=1
+SEARCH_MAX_RESULTS=6
+SEARCH_SUPPLEMENTARY_MAX_QUERIES=1
+SEARCH_SUPPLEMENTARY_MAX_TOTAL_ROUNDS=1
+SEARCH_SUPPLEMENTARY_MAX_RESULTS=3
+```
+
+---
+
+## ❓常见问题
+
+### 1. 日志里出现大量 `fetch_url` 失败
+
+这通常不是程序崩溃，而是目标网站拒绝抓取、证书异常或响应超时。当前逻辑会自动回退为搜索摘要继续生成。
+
+### 2. 为什么正文和参考文献还是会有不匹配？
+
+这个项目已经加入了来源覆盖、章节级引用约束和引用一致性检查，但如果搜索结果本身质量差，仍可能出现“结构完整但证据不足”的稿子。优先使用 `HTTP MCP + Tavily`，并尽量选更具体的论文主题。
+
+### 3. 为什么生成这么慢？
+
+大多是补充搜索和多轮修订导致。可参考上面的“性能建议”启用快速模式。
+
+### 4. 启动 HTTP MCP 时还要每次手填 Tavily Key 吗？
+
+不用。把 `TAVILY_API_KEY` 写进 `.env` 即可，之后直接运行：
+
+```bash
+uv run mcp-paper-mcp-http
+```
+
+---
+
 ## 🛠️ 开发
 
 ### 环境设置
@@ -325,6 +491,7 @@ uv run mypy .
 ## 🙏 致谢
 
 - [OpenRouter](https://openrouter.ai/) - LLM API 服务
+- [Tavily](https://www.tavily.com/) - 搜索 API
 - [Perplexity](https://perplexity.ai/) - 联网搜索模型
 - [Rich](https://github.com/Textualize/rich) - 终端美化库
 - [Click](https://click.palletsprojects.com/) - CLI 框架

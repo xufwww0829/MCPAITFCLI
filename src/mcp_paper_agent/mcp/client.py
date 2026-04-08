@@ -181,6 +181,8 @@ class MCPClient:
         self.headers = headers or {}
         self._initialized = False
         self._tools_cache: Optional[list[MCPTool]] = None
+        self.max_retries = 3
+        self.retry_backoff = 0.5
 
         if self.transport == "http":
             if not self.server_url:
@@ -233,19 +235,35 @@ class MCPClient:
         if params:
             payload["params"] = params
 
-        try:
-            result = await self._transport.send(payload)
-        except asyncio.TimeoutError as exc:
-            raise MCPTimeoutError(f"请求超时: {exc}", code=-32000) from exc
-        except httpx.TimeoutException as exc:
-            raise MCPTimeoutError(f"请求超时: {exc}", code=-32000) from exc
-        except httpx.ConnectError as exc:
-            raise MCPConnectionError(f"连接失败: {exc}", code=-32300) from exc
-        except httpx.HTTPStatusError as exc:
-            raise MCPError(
-                f"HTTP错误 {exc.response.status_code}: {exc.response.text}",
-                code=exc.response.status_code,
-            ) from exc
+        last_error: Exception | None = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                result = await self._transport.send(payload)
+                break
+            except asyncio.TimeoutError as exc:
+                last_error = MCPTimeoutError(f"请求超时: {exc}", code=-32000)
+            except httpx.TimeoutException as exc:
+                last_error = MCPTimeoutError(f"请求超时: {exc}", code=-32000)
+            except httpx.ConnectError as exc:
+                last_error = MCPConnectionError(f"连接失败: {exc}", code=-32300)
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if status_code >= 500:
+                    last_error = MCPError(
+                        f"HTTP错误 {status_code}: {exc.response.text}",
+                        code=status_code,
+                    )
+                else:
+                    raise MCPError(
+                        f"HTTP错误 {status_code}: {exc.response.text}",
+                        code=status_code,
+                    ) from exc
+
+            assert last_error is not None
+            if attempt >= self.max_retries:
+                raise last_error
+            logger.warning(f"MCP 请求失败，正在重试 ({attempt}/{self.max_retries}): {last_error}")
+            await asyncio.sleep(self.retry_backoff * attempt)
 
         if "error" in result:
             error = result["error"]

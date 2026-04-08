@@ -1,4 +1,4 @@
-"""MCP 搜索工具封装。"""
+"""MCP 工具封装。"""
 
 from __future__ import annotations
 
@@ -31,6 +31,17 @@ class SearchResults:
     @property
     def count(self) -> int:
         return len(self.results)
+
+
+@dataclass
+class FetchedPage:
+    """抓取到的网页正文。"""
+
+    url: str
+    title: str = ""
+    content: str = ""
+    snippet: str = ""
+    source_type: str = "general"
 
 
 class WebSearchTool:
@@ -142,3 +153,56 @@ class WebSearchTool:
             snippet=snippet,
             score=score,
         )
+
+
+class FetchPageTool:
+    """网页正文抓取工具。"""
+
+    @classmethod
+    async def execute(
+        cls,
+        client: MCPClient,
+        url: str,
+        max_chars: int = 6000,
+        tool_name: str = "fetch_url",
+    ) -> FetchedPage:
+        tool_result = await client.call_tool(
+            tool_name,
+            {"url": url, "max_chars": max_chars},
+        )
+        return cls._parse_tool_result(tool_result.content, fallback_url=url)
+
+    @classmethod
+    def _parse_tool_result(
+        cls,
+        content: list[dict[str, Any]],
+        fallback_url: str = "",
+    ) -> FetchedPage:
+        for item in content:
+            item_type = item.get("type")
+            if item_type == "json":
+                return cls._extract_from_payload(item.get("json"), fallback_url=fallback_url)
+            if item_type == "text":
+                text = item.get("text", "").strip()
+                if not text:
+                    continue
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError:
+                    return FetchedPage(url=fallback_url, content=text, snippet=text[:300])
+                return cls._extract_from_payload(payload, fallback_url=fallback_url)
+        return FetchedPage(url=fallback_url)
+
+    @classmethod
+    def _extract_from_payload(cls, payload: Any, fallback_url: str = "") -> FetchedPage:
+        if isinstance(payload, dict):
+            return FetchedPage(
+                url=str(payload.get("url") or fallback_url).strip(),
+                title=str(payload.get("title") or "").strip(),
+                content=str(payload.get("content") or payload.get("text") or "").strip(),
+                snippet=str(payload.get("snippet") or payload.get("summary") or "").strip(),
+                source_type=str(payload.get("source_type") or "general").strip() or "general",
+            )
+        if isinstance(payload, str):
+            return FetchedPage(url=fallback_url, content=payload, snippet=payload[:300])
+        return FetchedPage(url=fallback_url)

@@ -12,8 +12,10 @@ from diskcache import Cache
 from openai import OpenAI
 
 from mcp_paper_agent.config import settings
+from mcp_paper_agent.core.evidence import EvidenceClaim, EvidenceExtractor
 from mcp_paper_agent.logger import get_logger
-from mcp_paper_agent.mcp import MCPClient, WebSearchTool
+from mcp_paper_agent.mcp import FetchPageTool, MCPClient, WebSearchTool
+from mcp_paper_agent.mcp_server.search_backend import infer_source_type, should_skip_fetch
 
 logger = get_logger()
 
@@ -33,6 +35,7 @@ class RetrievalOutput:
     context: str
     citations: List[str] = field(default_factory=list)
     sources: List[SearchResult] = field(default_factory=list)
+    evidence_claims: List[EvidenceClaim] = field(default_factory=list)
 
 
 class Retriever:
@@ -66,6 +69,13 @@ class Retriever:
 内容: 详细摘要...
 
 请提供 {max_results} 条最相关的搜索结果。"""
+    QUERY_TEMPLATES = (
+        "{topic} 标准 报告 研究",
+        "{topic} 官方 企业 应用",
+    )
+    MAX_QUERY_VARIANTS = 3
+    MAX_FETCH_PER_QUERY = 3
+    SUPPLEMENTARY_FETCH_PER_QUERY = 2
 
     def __init__(
         self,
@@ -98,10 +108,27 @@ class Retriever:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache = Cache(str(self.cache_dir / "search_cache"))
         self.cache_expire = timedelta(days=cache_expire_days)
+        self.evidence_extractor = EvidenceExtractor()
 
     def _get_cache_key(self, query: str) -> str:
         """生成缓存键"""
         return hashlib.md5(f"search:{query}".encode()).hexdigest()
+
+    def _build_search_queries(self, topic: str) -> list[str]:
+        """将宽主题拆分为多路检索查询。"""
+        topic = topic.strip()
+        if not topic:
+            return []
+        queries = [topic]
+        queries.extend(template.format(topic=topic) for template in self.QUERY_TEMPLATES)
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for query in queries:
+            if query in seen:
+                continue
+            seen.add(query)
+            deduped.append(query)
+        return deduped[: self.MAX_QUERY_VARIANTS]
 
     def _parse_search_results(self, response_text: str) -> List[SearchResult]:
         """解析搜索结果
@@ -177,6 +204,36 @@ class Retriever:
 
         return sanitized[: self.max_results]
 
+    def _select_diverse_results(self, results: List[SearchResult]) -> List[SearchResult]:
+        """尽量保留不同来源类型的结果，避免单一来源主导。"""
+        claims = self.evidence_extractor.extract(results)
+        source_types = {
+            claim.source_id: claim.source_type
+            for claim in claims
+        }
+
+        selected: list[SearchResult] = []
+        selected_indexes: set[int] = set()
+
+        for preferred_type in ("regulation", "report", "company", "news"):
+            for index, result in enumerate(results, start=1):
+                if index in selected_indexes:
+                    continue
+                if source_types.get(index) == preferred_type:
+                    selected.append(result)
+                    selected_indexes.add(index)
+                    break
+
+        for index, result in enumerate(results, start=1):
+            if index in selected_indexes:
+                continue
+            selected.append(result)
+            selected_indexes.add(index)
+            if len(selected) >= self.max_results:
+                break
+
+        return selected[: self.max_results]
+
     def _format_citation(self, result: SearchResult, index: int) -> str:
         """格式化引用条目"""
         return f"[{index}] {result.title}. {result.url}"
@@ -190,6 +247,43 @@ class Retriever:
             )
         return "\n".join(context_parts)
 
+    def _should_fetch_result(self, result: SearchResult) -> bool:
+        if should_skip_fetch(result.url):
+            return False
+        source_type = infer_source_type(result.title, result.url)
+        if source_type not in {"regulation", "report", "research", "company"}:
+            return False
+        return result.score >= 0.35
+
+    async def _enrich_with_mcp_fetch_async(self, client: MCPClient, results: List[SearchResult]) -> List[SearchResult]:
+        enriched: list[SearchResult] = []
+        fetch_count = 0
+        for result in results:
+            content = result.content
+            if fetch_count < self.MAX_FETCH_PER_QUERY and self._should_fetch_result(result):
+                try:
+                    fetched = await FetchPageTool.execute(
+                        client=client,
+                        url=result.url,
+                        max_chars=5000,
+                        tool_name=settings.mcp.fetch_tool,
+                    )
+                    if fetched.content and len(fetched.content) > len(content):
+                        content = fetched.content
+                    fetch_count += 1
+                except Exception as exc:
+                    logger.debug(f"MCP 抓取正文失败，保留摘要: {result.url} ({exc})")
+
+            enriched.append(
+                SearchResult(
+                    title=result.title,
+                    url=result.url,
+                    content=content or result.title,
+                    score=result.score,
+                )
+            )
+        return enriched
+
     async def _mcp_search_async(self, query: str) -> List[SearchResult]:
         async with MCPClient.from_config(settings.mcp) as client:
             result = await WebSearchTool.execute(
@@ -198,7 +292,7 @@ class Retriever:
                 max_results=self.max_results,
                 tool_name=settings.mcp.search_tool,
             )
-            return [
+            search_results = [
                 SearchResult(
                     title=item.title,
                     url=item.url,
@@ -207,9 +301,21 @@ class Retriever:
                 )
                 for item in result.results
             ]
+            return await self._enrich_with_mcp_fetch_async(client, search_results)
 
     def _search_with_mcp(self, query: str) -> List[SearchResult]:
         return self._sanitize_results(asyncio.run(self._mcp_search_async(query)))
+
+    def _search_with_mcp_limited(self, query: str, max_results: int, max_fetch: int) -> List[SearchResult]:
+        original_max_results = self.max_results
+        original_max_fetch = self.MAX_FETCH_PER_QUERY
+        try:
+            self.max_results = max_results
+            self.MAX_FETCH_PER_QUERY = max_fetch
+            return self._sanitize_results(asyncio.run(self._mcp_search_async(query)))
+        finally:
+            self.max_results = original_max_results
+            self.MAX_FETCH_PER_QUERY = original_max_fetch
 
     def _search_with_openrouter(self, query: str) -> List[SearchResult]:
         prompt = self.SEARCH_PROMPT.format(
@@ -246,22 +352,38 @@ class Retriever:
                 context=cached["context"],
                 citations=cached["citations"],
                 sources=[SearchResult(**s) for s in cached["sources"]],
+                evidence_claims=[EvidenceClaim(**claim) for claim in cached.get("evidence_claims", [])],
             )
 
         logger.agent("Retriever", f"正在搜索: {query}")
+        query_variants = self._build_search_queries(query)
+        merged_results: list[SearchResult] = []
+        seen_urls: set[str] = set()
 
-        if self.provider == "mcp":
-            try:
-                results = self._search_with_mcp(query)
-            except Exception as exc:
-                logger.warning(f"MCP 搜索失败，回退到 OpenRouter 搜索: {exc}")
-                results = []
+        for query_variant in query_variants:
+            if self.provider == "mcp":
+                try:
+                    results = self._search_with_mcp(query_variant)
+                except Exception as exc:
+                    logger.warning(f"MCP 搜索失败，回退到 OpenRouter 搜索: {exc}")
+                    results = []
 
-            if not results:
-                logger.warning("MCP 搜索未返回有效链接，回退到 OpenRouter 搜索")
-                results = self._search_with_openrouter(query)
-        else:
-            results = self._search_with_openrouter(query)
+                if not results:
+                    logger.warning("MCP 搜索未返回有效链接，回退到 OpenRouter 搜索")
+                    results = self._search_with_openrouter(query_variant)
+            else:
+                results = self._search_with_openrouter(query_variant)
+
+            for result in results:
+                if result.url in seen_urls:
+                    continue
+                seen_urls.add(result.url)
+                merged_results.append(result)
+
+            if len(merged_results) >= self.max_results * 2:
+                break
+
+        results = self._select_diverse_results(merged_results)
 
         if not results:
             raise ValueError("检索阶段未获得任何有效来源链接，无法生成可靠引用。")
@@ -270,12 +392,25 @@ class Retriever:
             self._format_citation(r, i) for i, r in enumerate(results, 1)
         ]
         context = self._build_context(results)
+        evidence_claims = self.evidence_extractor.extract(results)
 
         self.cache.set(
             cache_key,
             {
                 "context": context,
                 "citations": citations,
+                "evidence_claims": [
+                    {
+                        "claim": claim.claim,
+                        "source_id": claim.source_id,
+                        "source_title": claim.source_title,
+                        "source_url": claim.source_url,
+                        "evidence_text": claim.evidence_text,
+                        "source_type": claim.source_type,
+                        "keywords": claim.keywords,
+                    }
+                    for claim in evidence_claims
+                ],
                 "sources": [
                     {"title": s.title, "url": s.url, "content": s.content, "score": s.score}
                     for s in results
@@ -290,6 +425,7 @@ class Retriever:
             context=context,
             citations=citations,
             sources=results,
+            evidence_claims=evidence_claims,
         )
 
     def supplementary_search(
@@ -306,9 +442,29 @@ class Retriever:
         """
         all_results: List[SearchResult] = []
         all_citations: List[str] = []
+        limited_queries = queries[: settings.search.supplementary_max_queries]
 
-        for query in queries:
-            output = self.search(query)
+        for query in limited_queries:
+            logger.agent("Retriever", f"正在补充搜索: {query}")
+            if self.provider == "mcp":
+                try:
+                    results = self._search_with_mcp_limited(
+                        query=query,
+                        max_results=settings.search.supplementary_max_results,
+                        max_fetch=self.SUPPLEMENTARY_FETCH_PER_QUERY,
+                    )
+                except Exception as exc:
+                    logger.warning(f"MCP 补充搜索失败，回退到 OpenRouter 搜索: {exc}")
+                    results = self._search_with_openrouter(query)[: settings.search.supplementary_max_results]
+            else:
+                results = self._search_with_openrouter(query)[: settings.search.supplementary_max_results]
+
+            output = RetrievalOutput(
+                context=self._build_context(results),
+                citations=[self._format_citation(result, index + 1) for index, result in enumerate(results)],
+                sources=results,
+                evidence_claims=self.evidence_extractor.extract(results),
+            )
             all_results.extend(output.sources)
 
         start_idx = 1
@@ -328,6 +484,7 @@ class Retriever:
             context=context,
             citations=all_citations,
             sources=all_results,
+            evidence_claims=self.evidence_extractor.extract(all_results),
         )
 
     def clear_cache(self) -> None:

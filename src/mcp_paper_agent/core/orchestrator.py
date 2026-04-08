@@ -16,6 +16,7 @@ from mcp_paper_agent.agents.reflector import AssessmentReport, Reflector
 from mcp_paper_agent.agents.retriever import RetrievalOutput, Retriever
 from mcp_paper_agent.agents.revisor import Revisor, RevisorOutput
 from mcp_paper_agent.config import settings
+from mcp_paper_agent.core.citation_checker import CitationChecker
 from mcp_paper_agent.logger import get_logger
 from mcp_paper_agent.utils.citations import normalize_paper_citations
 
@@ -95,6 +96,8 @@ class Orchestrator:
         self.generator = Generator()
         self.reflector = Reflector()
         self.revisor = Revisor()
+        self.min_citation_score = 8.0
+        self.max_supplementary_rounds = settings.search.supplementary_max_total_rounds
 
         self.cache_dir = cache_dir or settings.cache.cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -131,6 +134,71 @@ class Orchestrator:
             return True, f"达到最大迭代次数 ({self.max_iterations})"
 
         return False, "继续迭代"
+
+    def _ensure_evidence_coverage(self, retrieval_output: RetrievalOutput, topic: str) -> RetrievalOutput:
+        """确保综述所需的证据类型覆盖到位，不足则自动补搜。"""
+        coverage = self.retriever.evidence_extractor.check_coverage(retrieval_output.evidence_claims)
+        if coverage.is_sufficient:
+            return retrieval_output
+
+        logger.warning(
+            f"证据覆盖不足: {coverage.suggestions}，将执行补充搜索"
+        )
+        queries: list[str] = []
+        for missing_type in coverage.missing_types:
+            if missing_type == "regulation":
+                queries.append(f"{topic} 标准 法规 分级")
+            elif missing_type == "report":
+                queries.append(f"{topic} 市场 报告 趋势")
+            elif missing_type == "company":
+                queries.extend(
+                    [
+                        f"{topic} 企业 案例 官方",
+                        f"{topic} 车企 智驾 案例",
+                    ]
+                )
+
+        supplementary = self.retriever.supplementary_search(
+            queries=queries,
+            existing_context=retrieval_output.context,
+        )
+
+        merged_citations = retrieval_output.citations + [
+            citation
+            for citation in supplementary.citations
+            if citation not in retrieval_output.citations
+        ]
+        merged_sources = retrieval_output.sources + [
+            source for source in supplementary.sources
+            if source.url not in {existing.url for existing in retrieval_output.sources}
+        ]
+        merged_claims = retrieval_output.evidence_claims + [
+            claim for claim in supplementary.evidence_claims
+            if (claim.source_title, claim.claim) not in {
+                (existing.source_title, existing.claim)
+                for existing in retrieval_output.evidence_claims
+            }
+        ]
+
+        return RetrievalOutput(
+            context=supplementary.context,
+            citations=merged_citations,
+            sources=merged_sources,
+            evidence_claims=merged_claims,
+        )
+
+    def _ensure_citation_quality(
+        self,
+        paper: str,
+        evidence_claims: list,
+    ) -> None:
+        """引用一致性不过关时阻断出稿。"""
+        citation_result = CitationChecker(evidence_claims).check(paper)
+        if citation_result.score < self.min_citation_score:
+            issue_summary = "; ".join(issue.message for issue in citation_result.issues[:5])
+            raise ValueError(
+                f"引用一致性未达标 ({citation_result.score}/{self.min_citation_score})，已阻断出稿: {issue_summary}"
+            )
 
     def _run_single_iteration(
         self,
@@ -215,8 +283,10 @@ class Orchestrator:
         self._report_progress("检索资料中...", current_step, total_steps)
         logger.agent("Orchestrator", "执行检索...")
         retrieval_output: RetrievalOutput = self.retriever.search(topic)
+        retrieval_output = self._ensure_evidence_coverage(retrieval_output, topic)
         context = retrieval_output.context
         citations = retrieval_output.citations
+        evidence_claims = retrieval_output.evidence_claims
 
         current_step += 1
         self._report_progress("生成初稿中...", current_step, total_steps)
@@ -225,9 +295,11 @@ class Orchestrator:
             topic=topic,
             context=context,
             citations=citations,
+            evidence_claims=evidence_claims,
             target_words=self.target_word_count,
         )
         current_paper = normalize_paper_citations(gen_output.paper, citations)
+        supplementary_rounds_used = 0
 
         for iteration in range(1, self.max_iterations + 1):
             current_step += 1
@@ -249,7 +321,11 @@ class Orchestrator:
                 )
             )
 
-            if report.supplementary_search_needed and report.suggested_search_queries:
+            if (
+                report.supplementary_search_needed
+                and report.suggested_search_queries
+                and supplementary_rounds_used < self.max_supplementary_rounds
+            ):
                 logger.agent("Orchestrator", "执行补充搜索...")
                 supp_output = self.retriever.supplementary_search(
                     queries=report.suggested_search_queries,
@@ -257,6 +333,8 @@ class Orchestrator:
                 )
                 context = supp_output.context
                 citations = supp_output.citations
+                evidence_claims = supp_output.evidence_claims
+                supplementary_rounds_used += 1
 
             should_stop, _ = self._check_termination(report, iteration)
             if should_stop:
@@ -273,6 +351,7 @@ class Orchestrator:
         )
 
         current_paper = normalize_paper_citations(current_paper, citations)
+        self._ensure_citation_quality(current_paper, evidence_claims)
 
         result = OrchestratorResult(
             paper=current_paper,

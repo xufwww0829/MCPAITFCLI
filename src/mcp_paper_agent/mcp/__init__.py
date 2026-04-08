@@ -10,7 +10,7 @@ from mcp_paper_agent.mcp.client import (
     MCPToolError,
     MCPToolResult,
 )
-from mcp_paper_agent.mcp.tools import SearchResult, SearchResults, WebSearchTool
+from mcp_paper_agent.mcp.tools import FetchPageTool, FetchedPage, SearchResult, SearchResults, WebSearchTool
 
 __all__ = [
     "MCPClient",
@@ -21,6 +21,8 @@ __all__ = [
     "MCPTool",
     "MCPToolError",
     "MCPToolResult",
+    "FetchedPage",
+    "FetchPageTool",
     "SearchResult",
     "SearchResults",
     "WebSearchTool",

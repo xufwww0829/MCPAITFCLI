@@ -49,6 +49,9 @@ class SearchConfig(BaseSettings):
         description="搜索提供商: mcp、openrouter 或 tavily",
     )
     max_results: int = Field(default=10, description="每次搜索返回的最大结果数")
+    supplementary_max_queries: int = Field(default=1, description="每轮补充搜索最多执行的查询数")
+    supplementary_max_total_rounds: int = Field(default=2, description="整篇论文最多允许的补充搜索轮次")
+    supplementary_max_results: int = Field(default=4, description="补充搜索每次最多返回的结果数")
 
 
 class MCPConfig(BaseSettings):
