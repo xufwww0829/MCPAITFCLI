@@ -45,16 +45,40 @@ class SearchConfig(BaseSettings):
     )
 
     provider: str = Field(
-        default="openrouter",
-        description="搜索提供商: openrouter 或 tavily",
+        default="mcp",
+        description="搜索提供商: mcp、openrouter 或 tavily",
     )
     max_results: int = Field(default=10, description="每次搜索返回的最大结果数")
+
+
+class MCPConfig(BaseSettings):
+    """MCP 搜索配置"""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MCP_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    server_url: str = Field(default="", description="MCP 服务器 URL")
+    server_command: str = Field(default="", description="stdio 模式下的 MCP 启动命令")
+    server_args: str = Field(default="", description="stdio 模式下的 MCP 启动参数")
+    api_key: str = Field(default="", description="MCP API Key")
+    search_tool: str = Field(default="web_search", description="MCP 搜索工具名称")
+    fetch_tool: str = Field(default="fetch_url", description="MCP 页面抓取工具名称")
+    timeout: float = Field(default=30.0, description="MCP 调用超时时间（秒）")
+    transport: str = Field(default="stdio", description="MCP 传输方式：stdio 或 http")
+
+    @property
+    def server_args_list(self) -> list[str]:
+        return [arg for arg in self.server_args.split() if arg]
 
 
 class PaperConfig(BaseSettings):
     """论文生成配置"""
 
-    model_config = SettingsConfigDict(env_prefix="")
+    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
     target_word_count: int = Field(default=1900, description="目标字数")
     word_count_tolerance: int = Field(default=200, description="字数允许偏差")
@@ -73,7 +97,7 @@ class PaperConfig(BaseSettings):
 class CacheConfig(BaseSettings):
     """缓存配置"""
 
-    model_config = SettingsConfigDict(env_prefix="")
+    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
     cache_dir: Path = Field(default=Path("./cache"), description="缓存目录")
     cache_expire_days: int = Field(default=7, description="缓存过期天数")
@@ -87,7 +111,7 @@ class CacheConfig(BaseSettings):
 class LogConfig(BaseSettings):
     """日志配置"""
 
-    model_config = SettingsConfigDict(env_prefix="")
+    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
     log_level: str = Field(default="INFO", description="日志级别")
     log_file: Optional[Path] = Field(default=None, description="日志文件路径")
@@ -111,20 +135,31 @@ class Settings(BaseSettings):
 
     openrouter: OpenRouterConfig = Field(default_factory=OpenRouterConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
     paper: PaperConfig = Field(default_factory=PaperConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     log: LogConfig = Field(default_factory=LogConfig)
 
     @classmethod
-    def load(cls) -> "Settings":
+    def load(cls, env_file: str | Path | None = ".env") -> "Settings":
         """加载配置"""
         return cls(
-            openrouter=OpenRouterConfig(),
-            search=SearchConfig(),
-            paper=PaperConfig(),
-            cache=CacheConfig(),
-            log=LogConfig(),
+            _env_file=env_file,
+            openrouter=OpenRouterConfig(_env_file=env_file),
+            search=SearchConfig(_env_file=env_file),
+            mcp=MCPConfig(_env_file=env_file),
+            paper=PaperConfig(_env_file=env_file),
+            cache=CacheConfig(_env_file=env_file),
+            log=LogConfig(_env_file=env_file),
         )
 
 
 settings: Settings = Settings.load()
+
+
+def reload_settings(env_file: str | Path | None = ".env") -> Settings:
+    """重新加载全局配置并原地更新 settings 对象。"""
+    new_settings = Settings.load(env_file=env_file)
+    settings.__dict__.clear()
+    settings.__dict__.update(new_settings.__dict__)
+    return settings

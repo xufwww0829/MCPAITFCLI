@@ -27,7 +27,7 @@ from mcp_paper_agent.cli.styles import (
     format_score,
     format_word_count,
 )
-from mcp_paper_agent.config import settings
+from mcp_paper_agent.config import reload_settings, settings
 from mcp_paper_agent.core.orchestrator import Orchestrator, OrchestratorResult
 
 console = Console(theme=CONSTELLATION_THEME)
@@ -156,8 +156,9 @@ def save_paper(paper: str, topic: str, output_dir: Optional[Path] = None) -> Pat
 @click.group(invoke_without_command=True)
 @click.option("--version", "-v", is_flag=True, help="显示版本信息")
 @click.option("--interactive", "-i", is_flag=True, help="进入交互模式")
+@click.option("--env-file", type=click.Path(exists=True, dir_okay=False), help="指定配置文件路径")
 @click.pass_context
-def main(ctx: click.Context, version: bool, interactive: bool):
+def main(ctx: click.Context, version: bool, interactive: bool, env_file: Optional[str]):
     """✦ MCP Paper Agent - 反思智能体论文生成系统 ✦
 
     基于迭代优化的学术论文自动生成工具，采用星座主题界面。
@@ -167,6 +168,8 @@ def main(ctx: click.Context, version: bool, interactive: bool):
       mcp-paper config             查看配置
       mcp-paper cache --all        清空缓存
     """
+    reload_settings(env_file=env_file or ".env")
+
     if version:
         console.print(f"[star]★[/star] mcp-paper-agent version {__version__}")
         return
@@ -181,6 +184,7 @@ def main(ctx: click.Context, version: bool, interactive: bool):
 @click.option("--output", "-o", type=click.Path(), help="输出文件路径")
 @click.option("--max-iter", "-i", default=3, help="最大迭代次数")
 @click.option("--words", "-w", default=1900, help="目标字数")
+@click.option("--search-provider", type=click.Choice(["mcp", "openrouter", "tavily"]), help="覆盖搜索提供商")
 @click.option("--no-cache", is_flag=True, help="禁用缓存")
 @click.option("--preview", "-p", is_flag=True, help="显示论文预览")
 @click.option("--verbose", "-v", is_flag=True, help="详细输出")
@@ -189,6 +193,7 @@ def generate(
     output: Optional[str],
     max_iter: int,
     words: int,
+    search_provider: Optional[str],
     no_cache: bool,
     preview: bool,
     verbose: bool,
@@ -218,6 +223,9 @@ def generate(
         )
     )
     console.print()
+
+    if search_provider:
+        settings.search.provider = search_provider
 
     orchestrator = Orchestrator(
         max_iterations=max_iter,
@@ -275,6 +283,10 @@ def config():
         ("OPENROUTER_API_KEY", "***" if settings.openrouter.api_key else "未设置"),
         ("OPENROUTER_MODEL", settings.openrouter.model),
         ("OPENROUTER_SEARCH_MODEL", settings.openrouter.search_model),
+        ("SEARCH_PROVIDER", settings.search.provider),
+        ("MCP_TRANSPORT", settings.mcp.transport),
+        ("MCP_SERVER_URL", settings.mcp.server_url or "未设置"),
+        ("MCP_SERVER_COMMAND", settings.mcp.server_command or "未设置"),
         ("TARGET_WORD_COUNT", str(settings.paper.target_word_count)),
         ("MAX_ITERATIONS", str(settings.paper.max_iterations)),
     ]

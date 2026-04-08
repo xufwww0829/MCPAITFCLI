@@ -17,6 +17,7 @@ from mcp_paper_agent.agents.retriever import RetrievalOutput, Retriever
 from mcp_paper_agent.agents.revisor import Revisor, RevisorOutput
 from mcp_paper_agent.config import settings
 from mcp_paper_agent.logger import get_logger
+from mcp_paper_agent.utils.citations import normalize_paper_citations
 
 logger = get_logger()
 
@@ -226,7 +227,7 @@ class Orchestrator:
             citations=citations,
             target_words=self.target_word_count,
         )
-        current_paper = gen_output.paper
+        current_paper = normalize_paper_citations(gen_output.paper, citations)
 
         for iteration in range(1, self.max_iterations + 1):
             current_step += 1
@@ -237,6 +238,7 @@ class Orchestrator:
                 citations=citations,
                 iteration=iteration,
             )
+            current_paper = normalize_paper_citations(current_paper, citations)
 
             iteration_history.append(
                 IterationRecord(
@@ -269,6 +271,8 @@ class Orchestrator:
             citations=citations,
             target_word_count=self.target_word_count,
         )
+
+        current_paper = normalize_paper_citations(current_paper, citations)
 
         result = OrchestratorResult(
             paper=current_paper,

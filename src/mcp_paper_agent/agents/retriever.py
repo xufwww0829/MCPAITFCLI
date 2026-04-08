@@ -1,11 +1,7 @@
-"""检索智能体 - 负责联网搜索和引用收集
+"""检索智能体 - 负责联网搜索和引用收集。"""
 
-使用 OpenRouter 的 Perplexity 联网模型进行搜索，收集学术资料和引用信息。
-支持缓存机制，避免重复搜索相同主题。
-"""
-
+import asyncio
 import hashlib
-import json
 import re
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -17,6 +13,7 @@ from openai import OpenAI
 
 from mcp_paper_agent.config import settings
 from mcp_paper_agent.logger import get_logger
+from mcp_paper_agent.mcp import MCPClient, WebSearchTool
 
 logger = get_logger()
 
@@ -41,7 +38,7 @@ class RetrievalOutput:
 class Retriever:
     """检索智能体
 
-    使用 OpenRouter 的 Perplexity 联网模型进行搜索。
+    优先使用 MCP 搜索，必要时回退到 OpenRouter 搜索。
 
     Attributes:
         client: OpenAI 客户端
@@ -93,11 +90,9 @@ class Retriever:
         self.base_url = base_url or settings.openrouter.base_url
         self.search_model = search_model or settings.openrouter.search_model
         self.max_results = max_results or settings.search.max_results
+        self.provider = settings.search.provider.lower()
 
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-        )
+        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
 
         self.cache_dir = cache_dir or settings.cache.cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -132,7 +127,7 @@ class Retriever:
 
             if title_match:
                 title = title_match.group(1).strip()
-                url = url_match.group(1).strip() if url_match else f"https://search.result/{i}"
+                url = url_match.group(1).strip() if url_match else ""
                 content = content_match.group(1).strip() if content_match else block.strip()
 
                 results.append(
@@ -148,13 +143,39 @@ class Retriever:
             results.append(
                 SearchResult(
                     title="搜索结果",
-                    url="https://openrouter.ai",
+                    url="",
                     content=response_text[:500],
                     score=1.0,
                 )
             )
 
-        return results[:self.max_results]
+        return self._sanitize_results(results)
+
+    def _sanitize_results(self, results: List[SearchResult]) -> List[SearchResult]:
+        """过滤空链接、占位链接和重复链接。"""
+        sanitized: List[SearchResult] = []
+        seen_urls: set[str] = set()
+
+        for result in results:
+            url = (result.url or "").strip()
+            if not url.startswith(("http://", "https://")):
+                continue
+            if "search.result" in url:
+                continue
+            if url in seen_urls:
+                continue
+
+            seen_urls.add(url)
+            sanitized.append(
+                SearchResult(
+                    title=result.title.strip() or "未命名来源",
+                    url=url,
+                    content=result.content.strip() or result.title.strip(),
+                    score=result.score,
+                )
+            )
+
+        return sanitized[: self.max_results]
 
     def _format_citation(self, result: SearchResult, index: int) -> str:
         """格式化引用条目"""
@@ -164,8 +185,47 @@ class Retriever:
         """构建上下文文本"""
         context_parts = []
         for i, result in enumerate(results, 1):
-            context_parts.append(f"[{i}] {result.title}\n{result.content}\n")
+            context_parts.append(
+                f"[{i}] {result.title}\nURL: {result.url}\n摘要: {result.content}\n"
+            )
         return "\n".join(context_parts)
+
+    async def _mcp_search_async(self, query: str) -> List[SearchResult]:
+        async with MCPClient.from_config(settings.mcp) as client:
+            result = await WebSearchTool.execute(
+                client=client,
+                query=query,
+                max_results=self.max_results,
+                tool_name=settings.mcp.search_tool,
+            )
+            return [
+                SearchResult(
+                    title=item.title,
+                    url=item.url,
+                    content=item.content or item.snippet or item.title,
+                    score=item.score,
+                )
+                for item in result.results
+            ]
+
+    def _search_with_mcp(self, query: str) -> List[SearchResult]:
+        return self._sanitize_results(asyncio.run(self._mcp_search_async(query)))
+
+    def _search_with_openrouter(self, query: str) -> List[SearchResult]:
+        prompt = self.SEARCH_PROMPT.format(
+            query=query,
+            max_results=self.max_results,
+        )
+
+        response = self.client.chat.completions.create(
+            model=self.search_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=4096,
+        )
+
+        response_text = response.choices[0].message.content or ""
+        return self._parse_search_results(response_text)
 
     def search(self, query: str, use_cache: bool = True) -> RetrievalOutput:
         """执行搜索
@@ -190,22 +250,21 @@ class Retriever:
 
         logger.agent("Retriever", f"正在搜索: {query}")
 
-        prompt = self.SEARCH_PROMPT.format(
-            query=query,
-            max_results=self.max_results,
-        )
+        if self.provider == "mcp":
+            try:
+                results = self._search_with_mcp(query)
+            except Exception as exc:
+                logger.warning(f"MCP 搜索失败，回退到 OpenRouter 搜索: {exc}")
+                results = []
 
-        response = self.client.chat.completions.create(
-            model=self.search_model,
-            messages=[
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.3,
-            max_tokens=4096,
-        )
+            if not results:
+                logger.warning("MCP 搜索未返回有效链接，回退到 OpenRouter 搜索")
+                results = self._search_with_openrouter(query)
+        else:
+            results = self._search_with_openrouter(query)
 
-        response_text = response.choices[0].message.content or ""
-        results = self._parse_search_results(response_text)
+        if not results:
+            raise ValueError("检索阶段未获得任何有效来源链接，无法生成可靠引用。")
 
         citations = [
             self._format_citation(r, i) for i, r in enumerate(results, 1)

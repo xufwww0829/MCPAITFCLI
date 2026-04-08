@@ -41,6 +41,7 @@ dev = [
 
 [project.scripts]
 mcp-paper = "mcp_paper_agent.cli.main:main"
+mcp-paper-mcp-http = "mcp_paper_agent.mcp_server.server:main"
 
 [build-system]
 requires = ["hatchling"]

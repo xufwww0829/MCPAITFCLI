@@ -1,6 +1,3 @@
-"""核心模块"""
-
-from .orchestrator import Orchestrator
-from .format_checker import FormatChecker
+"""核心模块。"""
 
 __all__ = ["Orchestrator", "FormatChecker"]

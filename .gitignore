@@ -51,6 +51,7 @@ logs/
 htmlcov/
 .tox/
 .nox/
+tests/
 
 # Type checking
 .mypy_cache/
